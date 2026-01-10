@@ -226,15 +226,32 @@ class O3DFile:
                 self.gmobjects.append(gmo)
 
         # Motion attributes (version 21+)
+        # Only read if we have enough bytes left in the file
+        # Some files (like mvr_vempain.o3d) don't have this section
         if version >= 21:
-            attr_count = reader.read_int32()
-            if attr_count == self.o3d.frame_count and self.o3d.frame_count > 0:
-                for _ in range(self.o3d.frame_count):
-                    ma = MotionAttribute()
-                    ma.type = reader.read_uint16()
-                    ma.sound_id = reader.read_int32()
-                    ma.frame = reader.read_float()
-                    self.o3d.attributes.append(ma)
+            try:
+                current_pos = f.tell()
+                f.seek(0, 2)  # Seek to end
+                file_size = f.tell()
+                f.seek(current_pos)  # Restore position
+                
+                # Check if we have at least 4 bytes left (for attr_count)
+                if file_size - current_pos >= 4:
+                    attr_count = reader.read_int32()
+                    # Check if count matches frame_count and we have enough bytes for all attributes
+                    # Each attribute is 10 bytes (uint16 + int32 + float = 2 + 4 + 4)
+                    if attr_count == self.o3d.frame_count and self.o3d.frame_count > 0:
+                        bytes_needed = self.o3d.frame_count * 10
+                        if file_size - f.tell() >= bytes_needed:
+                            for _ in range(self.o3d.frame_count):
+                                ma = MotionAttribute()
+                                ma.type = reader.read_uint16()
+                                ma.sound_id = reader.read_int32()
+                                ma.frame = reader.read_float()
+                                self.o3d.attributes.append(ma)
+            except (struct.error, IOError):
+                # File doesn't have motion attributes section, skip it
+                pass
 
         f.close()
         return self.o3d
