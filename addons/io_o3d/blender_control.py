@@ -180,7 +180,7 @@ def create_blender_armature(name : str, chr : Skeleton, gmobjects : list[GMObjec
 
         # Set any gameobject parents to bones
         for gmo in gmobjects:
-            if gmo.parent_id != -1 and gmo.parent_gm_type == 2:
+            if gmo.parent_id != -1 and gmo.parent_gm_type == GMT_BONE:
                 bone = chr.bones[gmo.parent_id]
                 gmo.blender_obj.parent = arm_obj
                 gmo.blender_obj.parent_type = "BONE"
@@ -205,7 +205,8 @@ def create_blender_armature(name : str, chr : Skeleton, gmobjects : list[GMObjec
             if gmo.used_bone_count > 0:
                 bone_ids = gmo.used_bones
             else:
-                bone_ids = [i for i in range(28)]
+                from .o3d_types import MAX_VS_BONE
+                bone_ids = [i for i in range(MAX_VS_BONE)]
 
             for block in gmo.material_blocks:
                 if block.used_bone_count > 0:
@@ -221,10 +222,11 @@ def create_blender_armature(name : str, chr : Skeleton, gmobjects : list[GMObjec
                     weight1, weight2 = gmo.weights[vertex_id]
                     bone1, bone2 = gmo.bone_ids[vertex_id]
 
-                    if weight1 != 0:
-                        obj.vertex_groups[chr.bones[bone_ids[bone1 // 3]].name].add([vertex_id], weight1, "REPLACE")
-                    if weight2 != 0:
-                        obj.vertex_groups[chr.bones[bone_ids[bone2 // 3]].name].add([vertex_id], weight2, "REPLACE")
+                    # Use bone IDs directly (they're indices into bone_ids array)
+                    if weight1 != 0 and bone1 < len(bone_ids) and bone_ids[bone1] < len(chr.bones):
+                        obj.vertex_groups[chr.bones[bone_ids[bone1]].name].add([vertex_id], weight1, "REPLACE")
+                    if weight2 != 0 and bone2 < len(bone_ids) and bone_ids[bone2] < len(chr.bones):
+                        obj.vertex_groups[chr.bones[bone_ids[bone2]].name].add([vertex_id], weight2, "REPLACE")
 
         chr.blender_armature = arm_obj
 

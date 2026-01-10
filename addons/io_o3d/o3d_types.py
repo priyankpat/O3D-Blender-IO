@@ -2,6 +2,14 @@ import bpy
 from bpy.types import Object
 from mathutils import Vector, Quaternion, Matrix
 
+# GMTYPE enum values
+GMT_NORMAL = 0
+GMT_SKIN = 1
+GMT_BONE = 2
+
+# Maximum bones per vertex shader
+MAX_VS_BONE = 28
+
 class Skeleton:
     def __init__(self):
         self.oid = 0
@@ -15,6 +23,11 @@ class Skeleton:
         self.events = []
         self.event_parent_ids = []
         self.blender_armature = None
+        # Special bone indices
+        self.r_hand_idx = -1
+        self.l_hand_idx = -1
+        self.r_arm_idx = -1
+        self.l_arm_idx = -1
 
 
 class TMAnimation:
@@ -130,6 +143,7 @@ class GMObject:
         self.gm_type = 0
         self.parent_gm_type = 0
         self.used_bone_count = 0
+        self.light = False  # Light flag from upper bit
         self.bbmin = (0, 0, 0)
         self.bbmax = (0, 0, 0)
         self.vertex_list_count = 0

@@ -5,6 +5,15 @@ from .o3d_types import *
 from .blender_control import *
 from mathutils import Vector, Quaternion, Matrix
 
+# Import constants
+GMT_NORMAL = 0
+GMT_SKIN = 1
+GMT_BONE = 2
+MAX_VS_BONE = 28
+VER_MESH = 20  # Minimum supported .o3d version
+VER_BONE = 4   # Minimum supported .chr version
+VER_MOTION = 10  # Required .ani version
+
 
 class BinaryReader:
     def __init__(self, file):
@@ -126,6 +135,10 @@ class O3DFile:
         name = name.decode("utf-8", errors="ignore")
         
         version = reader.read_int32()
+        if version < VER_MESH:
+            f.close()
+            raise ValueError(f"O3D file version {version} is not supported. Minimum version is {VER_MESH}")
+        
         self.o3d.oid = reader.read_int32() # ID
         self.o3d.forces.append(reader.read_vec3())
         self.o3d.forces.append(reader.read_vec3())
@@ -184,8 +197,9 @@ class O3DFile:
                 if self.o3d.lod:
                     gmo.name += f"-lod{i + 1}"
 
-                gmo.gm_type = reader.read_int32()
-                gmo.gm_type = gmo.gm_type & 0xffff
+                gm_type_raw = reader.read_int32()
+                gmo.light = (gm_type_raw & 0x80000000) != 0
+                gmo.gm_type = gm_type_raw & 0xffff
 
                 gmo.used_bone_count = reader.read_int32()
                 for _ in range(gmo.used_bone_count):
@@ -201,7 +215,7 @@ class O3DFile:
                 
                 self.read_geometry(f, reader, gmo)
 
-                if gmo.gm_type == 0 and self.o3d.frame_count > 0:
+                if gmo.gm_type == GMT_NORMAL and self.o3d.frame_count > 0:
                     if reader.read_int32():
                         for _ in range(self.o3d.frame_count):
                             anim = TMAnimation()
@@ -211,17 +225,16 @@ class O3DFile:
 
                 self.gmobjects.append(gmo)
 
-        # TODO: Somehow crashes some files like mvr_vempain.o3d
-        """
+        # Motion attributes (version 21+)
         if version >= 21:
-            if reader.read_int32() == self.o3d.frame_count:
+            attr_count = reader.read_int32()
+            if attr_count == self.o3d.frame_count and self.o3d.frame_count > 0:
                 for _ in range(self.o3d.frame_count):
                     ma = MotionAttribute()
                     ma.type = reader.read_uint16()
                     ma.sound_id = reader.read_int32()
                     ma.frame = reader.read_float()
                     self.o3d.attributes.append(ma)
-        """
 
         f.close()
         return self.o3d
@@ -245,15 +258,17 @@ class O3DFile:
         for _ in range(gmo.vertex_list_count):
             gmo.vertex_list.append(reader.read_vec3())
             
-        self.o3d.has_skin = gmo.gm_type == 1
+        is_skin = gmo.gm_type == GMT_SKIN
 
         for _ in range(gmo.vertex_count):
             pos = reader.read_vec3()
-            if self.o3d.has_skin:
+            if is_skin:
                 w1 = reader.read_float()
                 w2 = reader.read_float()
-                id1 = reader.read_uint16()
-                id2 = reader.read_uint16()
+                # matIdx is a DWORD (4 bytes) containing packed bone IDs
+                matIdx = reader.read_uint32()
+                id1 = matIdx & 0xFFFF  # Lower 16 bits
+                id2 = (matIdx >> 16) & 0xFFFF  # Upper 16 bits
                 
                 gmo.weights.append((w1, w2))
                 gmo.bone_ids.append((id1, id2))
@@ -309,7 +324,7 @@ class O3DFile:
             block.effect = reader.read_uint32()
             block.amount = reader.read_int32()
             block.used_bone_count = reader.read_int32()
-            for _ in range(28):
+            for _ in range(MAX_VS_BONE):
                 block.used_bones.append(reader.read_int32())
 
             gmo.material_blocks.append(block)
@@ -328,23 +343,36 @@ class O3DFile:
         self.chr.oid = reader.read_int32()
         self.chr.bone_count = reader.read_int32()
 
-        for _ in range(self.chr.bone_count):
+        for i in range(self.chr.bone_count):
             bone = Bone()
             name_len = reader.read_int32()
-            bone.name = reader.read_string(name_len)
+            # Read exact bytes (C++ reads exactly nLen bytes, not null-terminated)
+            bone.name = reader.file.read(name_len).decode("utf-8", errors="ignore").rstrip("\x00")
             bone.transform = reader.read_transform()
             bone.inverse_transform = reader.read_transform()
             bone.local_transform = reader.read_transform()
             bone.parent_id = reader.read_int32()
             self.chr.bones.append(bone)
+            
+            # Detect special bone names (matching C++ code)
+            bone_name_lower = bone.name.lower()
+            if "r hand" in bone_name_lower:
+                self.chr.r_hand_idx = i
+            if "l hand" in bone_name_lower:
+                self.chr.l_hand_idx = i
+            if "r forearm" in bone_name_lower:
+                self.chr.r_arm_idx = i
+            if "l forearm" in bone_name_lower:
+                self.chr.l_arm_idx = i
 
         for bone in self.chr.bones:
             if bone.parent_id != -1:
                 self.chr.bones[bone.parent_id].children.append(bone)
 
         for gmo in self.gmobjects:
-            if gmo.parent_id != -1 and gmo.parent_gm_type == 2:
-                self.chr.bones[gmo.parent_id].children_gmos.append(gmo)
+            if gmo.parent_id != -1 and gmo.parent_gm_type == GMT_BONE:
+                if gmo.parent_id < len(self.chr.bones):
+                    self.chr.bones[gmo.parent_id].children_gmos.append(gmo)
 
         ### Coordinate space stuff
         for bone in self.chr.bones:
@@ -463,14 +491,20 @@ class O3DFile:
         ani.bone_count = bone_count
         ani.frame_count = frame_count
         
-        for _ in range(bone_count):
+        for i in range(bone_count):
             bone = Bone()
             name_len = reader.read_int32()
-            bone.name = reader.read_string(name_len)
+            # Read exact bytes (C++ reads exactly nLen bytes)
+            bone.name = reader.file.read(name_len).decode("utf-8", errors="ignore").rstrip("\x00")
             bone.inverse_transform = reader.read_transform()
             bone.local_transform = reader.read_transform()
             bone.parent_id = reader.read_int32()
             ani.bones.append(bone)
+            
+            # Validate bone name matches skeleton (if available)
+            if self.chr and i < len(self.chr.bones):
+                if bone.name != self.chr.bones[i].name:
+                    print(f"Warning: Animation bone '{bone.name}' doesn't match skeleton bone '{self.chr.bones[i].name}' at index {i}")
 
         ani_count = reader.read_int32()
 
@@ -509,7 +543,7 @@ class O3DFile:
             writer.write_int32(has_paths)
             if has_paths:
                 for path in motion.paths:
-                    writer.write_transform(path)
+                    writer.write_vec3(path)  # Path is vec3, not transform
 
             self.write_TMAnimation(writer, motion)
 
@@ -521,7 +555,7 @@ class O3DFile:
             writer.write_int32(motion.event_count)
             if motion.event_count > 0:
                 for event in motion.events:
-                    writer.write_bytes(event) 
+                    writer.write_vec3(event)  # Events are vec3, not bytes 
 
 
     def write_TMAnimation(self, writer, motion):
